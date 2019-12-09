@@ -12,17 +12,39 @@ edgexProxy.use(bodyParser.json());
 edgexProxy.use(bodyParser.urlencoded({extended: false}));
 
 var mqtt_client = mqtt.connect('mqtt://10.211.55.21:1883');
+var ae_Name = "edgex_test";
 
-var registerSensoredValueFromEdgeX = function (reading, callBackResponse) {
+var registerDevice = function (device_id, callBackResponse) {
 
-    var sensrod_value = reading ['value'];
-    var sensrod_value_name = reading ['name'];
+    var bodyObject = bodyGenerator.ContainerBodyGenerator(device_id);
 
-    var targetURL = "http://203.253.128.161:7579/Mobius/edgex_test/" + sensrod_value_name;
+    var targetURL = "http://203.253.128.161:7579/Mobius" + ae_Name;
 
-    console.log(targetURL)
+    requestToServer({
+        url: targetURL,
+        method: 'POST',
+        json: true,
+        headers: { // Basic AE resource structure for registration
+            'Accept': 'application/json',
+            'X-M2M-RI': '12345',
+            'X-M2M-Origin': 'Origin',
+            'Content-type': 'application/json; ty=3'
+        },
+        body: bodyObject
+    }, function (error, oneM2MResponse, body) {
+        if(typeof(oneM2MResponse) !== 'undefined') {
+            callBackResponse(oneM2MResponse.statusCode);
+        }
+    });
+};
 
-    var bodyObject = bodyGenerator.contentInstanceBodyGeneratorForJSON(sensrod_value);
+var registerSensoredValueFromEdgeX = function (concat_device_id, sensored_value, callBackResponse) {
+
+    var targetURL = "http://203.253.128.161:7579/Mobius/" + ae_Name + "/" + concat_device_id;
+
+    console.log(targetURL);
+
+    var bodyObject = bodyGenerator.contentInstanceBodyGenerator(sensored_value);
 
     requestToServer({
         url: targetURL,
@@ -48,13 +70,14 @@ var registerSensoredValueFromEdgeX = function (reading, callBackResponse) {
 };
 
 mqtt_client.on('message', function (topic, message) {
-    // message is Buffer
 
-    var rcvMessage = message.toString()
-    var rcvMessage = JSON.parse(rcvMessage)
-
-    var readings = rcvMessage['readings']
     var iterationCount = 0;
+
+    var rcvMessage = message.toString();
+    var rcvMessage = JSON.parse(rcvMessage);
+
+    var device_id = rcvMessage['id'];
+    var readings = rcvMessage['readings'];
 
     async.whilst(
         function() {
@@ -64,19 +87,50 @@ mqtt_client.on('message', function (topic, message) {
         function (async_for_loop_callback) {
 
             var reading = readings[iterationCount];
+            var sensored_value_type = reading ['name'];
+            var sensored_value = reading ['value'];
 
-            console.log(reading);
+            async.waterfall([
+                function(callbackForDevice) {
+                    var concat_device_id = device_id + ":" + sensored_value_type;
 
-            registerSensoredValueFromEdgeX(reading, function (statusCode) {
-                if(statusCode == 201) {
-                    iterationCount++;
-                    console.log("201, Data has been updated");
-                    async_for_loop_callback (null, iterationCount);
-                } else if (statusCode == 404) {
-                    iterationCount++;
-                    console.log("404, Not found error has occurred");
-                } else {
-                    console.log("This condition is going to be covered later");
+                    // Device registration
+                    registerDevice(concat_device_id, function (statusCode) {
+                        if(statusCode == 201) {
+                            console.log("201, Container resource has been created");
+                            callbackForDevice(null, concat_device_id);
+                        } else if (statusCode == 409) {
+                            console.log("409, Container resource has been already created");
+                            callbackForDevice(null, concat_device_id);
+                        } else {
+                            console.log("This condition is going to be covered later");
+                            callbackForDevice(null);
+                        }
+                    });
+                },
+
+                function(concat_device_id, callbackForValue) {
+                    registerSensoredValueFromEdgeX(concat_device_id, sensored_value, function (statusCode) {
+                        if(statusCode == 201) {
+                            console.log("201, Data has been updated\n");
+                            callbackForValue(null, statusCode)
+                        } else if (statusCode == 404) {
+                            console.log("404, Not found error has occurred\n");
+                            callbackForValue(null, statusCode)
+                        } else {
+                            console.log("This condition is going to be covered later\n");
+                        }
+                    });
+                }
+            ], function (statusCode, result) {
+                if(statusCode) {
+                    if(statusCode == 201 || statusCode == 409) {
+                        iterationCount++;  async_for_loop_callback (null, iterationCount);
+                    } else {
+                        iterationCount++;  async_for_loop_callback (null, iterationCount);
+                    }
+                } else { // Container → contentInstance → Subscription (success)
+                    console.log("This condition is going to be covered later\n");
                 }
             });
         }
@@ -86,7 +140,7 @@ mqtt_client.on('message', function (topic, message) {
 mqtt_client.on('connect', function () {
     mqtt_client.subscribe('EdgeXDataTopic', function (err) {
         if (!err) {
-            console.log("EdgeX Proxy is subscribing the EdgeX")
+            console.log("EdgeX Proxy is subscribing the EdgeX\n")
         }
     })
 });
